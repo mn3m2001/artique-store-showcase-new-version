@@ -8,9 +8,12 @@ const bucket = (kind: MediaKind) => kind === "product-media" ? "artique-products
 
 export async function saveMedia(kind: MediaKind, filename: string, bytes: Buffer) {
   if (usesCloudStorage()) {
-    const { error } = await cloudClient().storage.from(bucket(kind)).upload(filename, bytes, { contentType: "image/webp", upsert: false });
-    if (error) throw new Error(`Image upload failed: ${error.message}`);
-    return;
+    const client = cloudClient();
+    if (client) {
+      const { error } = await client.storage.from(bucket(kind)).upload(filename, bytes, { contentType: "image/webp", upsert: false });
+      if (error) throw new Error(`Image upload failed: ${error.message}`);
+      return;
+    }
   }
   const directory = path.join(dataDirectory(), kind);
   await fs.mkdir(directory, { recursive: true });
@@ -19,9 +22,13 @@ export async function saveMedia(kind: MediaKind, filename: string, bytes: Buffer
 
 export async function readMedia(kind: MediaKind, filename: string): Promise<Buffer> {
   if (usesCloudStorage()) {
-    const { data, error } = await cloudClient().storage.from(bucket(kind)).download(filename);
-    if (error || !data) throw new Error("Image not found");
-    return Buffer.from(await data.arrayBuffer());
+    const client = cloudClient();
+    if (client) {
+      const { data, error } = await client.storage.from(bucket(kind)).download(filename);
+      if (!error && data) {
+        return Buffer.from(await data.arrayBuffer());
+      }
+    }
   }
   return fs.readFile(path.join(dataDirectory(), kind, filename));
 }

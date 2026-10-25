@@ -6,6 +6,7 @@ class Conflict extends Error {}
 
 export async function readCloudState<T>(initial?: T): Promise<T> {
   const client = cloudClient();
+  if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
   let { data, error } = await client.from("artique_state").select("revision,payload").eq("id", "store").single();
   if (error?.code === "PGRST116" && initial) {
     const seeded = await client.from("artique_state").upsert({ id: "store", revision: 1, payload: initial }, { onConflict: "id", ignoreDuplicates: true });
@@ -22,7 +23,9 @@ export async function readCloudState<T>(initial?: T): Promise<T> {
 export async function writeCloudState<T>(payload: T): Promise<void> {
   const revision = transaction.getStore()?.revision;
   if (revision === undefined) throw new Error("Cloud writes require a transaction.");
-  const { data, error } = await cloudClient().rpc("artique_compare_and_swap", { expected_revision: revision, next_payload: payload });
+  const client = cloudClient();
+  if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
+  const { data, error } = await client.rpc("artique_compare_and_swap", { expected_revision: revision, next_payload: payload });
   if (error) throw new Error(`Cloud save failed: ${error.message}`);
   if (!data) throw new Conflict();
 }

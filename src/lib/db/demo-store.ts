@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { dataDirectory } from "@/lib/data-path";
 import { usesCloudStorage } from "@/lib/cloud";
 import { readCloudState, writeCloudState, cloudTransaction } from "./cloud-state";
 import {
@@ -53,7 +54,7 @@ export interface CreateOrderInput {
   }[];
 }
 
-const DATA_DIR = path.resolve(/* turbopackIgnore: true */ process.env.ARTIQUE_DATA_DIR || path.join(process.cwd(), ".demo-data"));
+const DATA_DIR = path.resolve(/* turbopackIgnore: true */ dataDirectory());
 const DATA_FILE = path.join(DATA_DIR, "store.json");
 
 let memoryCache: StoreData | null = null;
@@ -61,10 +62,22 @@ let fileLock = Promise.resolve();
 
 async function readStore(): Promise<StoreData> {
   if (usesCloudStorage()) {
-    const data = await readCloudState<StoreData>({ version: 1, settings: INITIAL_SETTINGS, categories: INITIAL_CATEGORIES, products: INITIAL_PRODUCTS, shippingAreas: INITIAL_SHIPPING_AREAS, orders: [] });
-    data.settings = { ...INITIAL_SETTINGS, ...data.settings };
-    return data;
+    try {
+      const data = await readCloudState<StoreData>({ version: 1, settings: INITIAL_SETTINGS, categories: INITIAL_CATEGORIES, products: INITIAL_PRODUCTS, shippingAreas: INITIAL_SHIPPING_AREAS, orders: [] });
+      if (data && data.products) {
+        data.settings = { ...INITIAL_SETTINGS, ...(data.settings || {}) };
+        memoryCache = data;
+        return data;
+      }
+    } catch (err) {
+      console.warn("Cloud store read failed, falling back to local/memory:", err);
+    }
   }
+
+  if (memoryCache) {
+    return memoryCache;
+  }
+
   try {
     const raw = await fs.readFile(DATA_FILE, "utf8");
     const parsed: StoreData = JSON.parse(raw);
@@ -72,8 +85,6 @@ async function readStore(): Promise<StoreData> {
     memoryCache = parsed;
     return memoryCache!;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await fs.mkdir(DATA_DIR, { recursive: true });
     const initial: StoreData = {
       version: 1,
       settings: INITIAL_SETTINGS,
@@ -82,23 +93,45 @@ async function readStore(): Promise<StoreData> {
       shippingAreas: INITIAL_SHIPPING_AREAS,
       orders: [],
     };
-    await fs.writeFile(DATA_FILE, JSON.stringify(initial, null, 2), "utf8");
     memoryCache = initial;
+    try {
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      await fs.writeFile(DATA_FILE, JSON.stringify(initial, null, 2), "utf8");
+    } catch {
+      // Ignored if read-only filesystem
+    }
     return initial;
   }
 }
 
 async function writeStore(data: StoreData): Promise<void> {
-  if (usesCloudStorage()) return writeCloudState(data);
   memoryCache = data;
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmp = `${DATA_FILE}.tmp.${Date.now()}`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
-  await fs.rename(tmp, DATA_FILE);
+  if (usesCloudStorage()) {
+    try {
+      await writeCloudState(data);
+      return;
+    } catch (err) {
+      console.warn("Cloud write failed, persisting to memory/disk:", err);
+    }
+  }
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tmp = `${DATA_FILE}.tmp.${Date.now()}`;
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+    await fs.rename(tmp, DATA_FILE);
+  } catch {
+    // If filesystem write fails on serverless, memoryCache is already updated
+  }
 }
 
 export async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  if (usesCloudStorage()) return cloudTransaction(fn);
+  if (usesCloudStorage()) {
+    try {
+      return await cloudTransaction(fn);
+    } catch (err) {
+      console.warn("Cloud transaction lock failed, using local lock:", err);
+    }
+  }
   const next = fileLock.then(fn, fn);
   fileLock = next.then(() => {}, () => {});
   return next;
