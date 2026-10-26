@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fake = vi.hoisted(() => ({ revision: 1, payload: { count: 0 }, conflicts: 0, fail: false }));
-vi.mock("@/lib/cloud", () => ({ cloudClient: () => ({
-  from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { revision: fake.revision, payload: structuredClone(fake.payload) }, error: fake.fail ? { message: "offline" } : null }) }) }) }),
-  rpc: async (_name: string, args: { expected_revision: number; next_payload: { count: number } }) => {
-    if (fake.conflicts > 0) { fake.conflicts--; fake.revision++; fake.payload.count++; return { data: false, error: null }; }
-    if (args.expected_revision !== fake.revision) return { data: false, error: null };
-    fake.payload = structuredClone(args.next_payload); fake.revision++;
-    return { data: true, error: null };
-  },
-}) }));
+vi.mock("@/lib/cloud", () => ({
+  isUsingNeon: () => false,
+  neonClient: () => null,
+  cloudClient: () => ({
+    from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { revision: fake.revision, payload: structuredClone(fake.payload) }, error: fake.fail ? { message: "offline" } : null }) }) }) }),
+    rpc: async (_name: string, args: { expected_revision: number; next_payload: { count: number } }) => {
+      if (fake.conflicts > 0) { fake.conflicts--; fake.revision++; fake.payload.count++; return { data: false, error: null }; }
+      if (args.expected_revision !== fake.revision) return { data: false, error: null };
+      fake.payload = structuredClone(args.next_payload); fake.revision++;
+      return { data: true, error: null };
+    },
+  }),
+}));
 import { cloudTransaction, readCloudState, writeCloudState } from "@/lib/db/cloud-state";
 
 describe("Distributed cloud writes", () => {

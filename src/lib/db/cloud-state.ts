@@ -1,10 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { cloudClient } from "@/lib/cloud";
+import { cloudClient, neonClient, isUsingNeon } from "@/lib/cloud";
 
 const transaction = new AsyncLocalStorage<{ revision?: number }>();
 class Conflict extends Error {}
 
-function withTimeout<T>(promise: PromiseLike<T>, ms = 1800): Promise<T> {
+function withTimeout<T>(promise: PromiseLike<T>, ms = 2500): Promise<T> {
   let timer: NodeJS.Timeout;
   return Promise.race([
     Promise.resolve(promise),
@@ -17,6 +17,36 @@ function withTimeout<T>(promise: PromiseLike<T>, ms = 1800): Promise<T> {
 }
 
 export async function readCloudState<T>(initial?: T): Promise<T> {
+  // 1. Neon Serverless Postgres Mode
+  if (isUsingNeon()) {
+    const sql = neonClient();
+    if (!sql) throw new Error("Cloud store unavailable: Neon database URL not configured");
+    
+    let rows = await withTimeout(
+      sql`SELECT revision, payload FROM artique_state WHERE id = 'store' LIMIT 1;`,
+      2500
+    );
+
+    if (rows.length === 0 && initial) {
+      await withTimeout(
+        sql`INSERT INTO artique_state (id, revision, payload) VALUES ('store', 1, ${JSON.stringify(initial)}::jsonb) ON CONFLICT (id) DO NOTHING;`,
+        2500
+      );
+      rows = await withTimeout(
+        sql`SELECT revision, payload FROM artique_state WHERE id = 'store' LIMIT 1;`,
+        2500
+      );
+    }
+
+    if (rows.length === 0) throw new Error("Cloud store is empty.");
+    
+    const data = rows[0] as { revision: number; payload: T };
+    const context = transaction.getStore();
+    if (context) context.revision = data.revision;
+    return (typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload) as T;
+  }
+
+  // 2. Fallback: Supabase Client Mode
   const client = cloudClient();
   if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
   let { data, error } = await withTimeout(
@@ -44,6 +74,23 @@ export async function readCloudState<T>(initial?: T): Promise<T> {
 export async function writeCloudState<T>(payload: T): Promise<void> {
   const revision = transaction.getStore()?.revision;
   if (revision === undefined) throw new Error("Cloud writes require a transaction.");
+
+  // 1. Neon Serverless Postgres Mode
+  if (isUsingNeon()) {
+    const sql = neonClient();
+    if (!sql) throw new Error("Cloud store unavailable: Neon database URL not configured");
+
+    const result = await withTimeout(
+      sql`SELECT artique_compare_and_swap(${revision}, ${JSON.stringify(payload)}::jsonb) AS success;`,
+      3000
+    );
+
+    const success = Boolean(result[0]?.success);
+    if (!success) throw new Conflict();
+    return;
+  }
+
+  // 2. Fallback: Supabase Client Mode
   const client = cloudClient();
   if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
   const { data, error } = await withTimeout(
