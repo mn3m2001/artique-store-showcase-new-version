@@ -109,12 +109,10 @@ export function SettingsClient({
   };
 
   useEffect(() => {
-    let active = true;
-    getSettingsHistoryAction().then((res) => {
-      if (active && res.success) setHistory(res.history);
-    }).catch(() => { if (active) setErrorMessage("تعذر تحميل سجل النسخ. أعيدي المحاولة بعد التأكد من الاتصال."); });
-    return () => { active = false; };
-  }, []);
+    if (activeTab === "history" && history.length === 0) {
+      loadHistory();
+    }
+  }, [activeTab]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();

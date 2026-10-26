@@ -58,15 +58,25 @@ const DATA_DIR = path.resolve(/* turbopackIgnore: true */ dataDirectory());
 const DATA_FILE = path.join(DATA_DIR, "store.json");
 
 let memoryCache: StoreData | null = null;
+let lastCacheTime = 0;
+let inFlightRead: Promise<StoreData> | null = null;
+const CACHE_TTL_MS = 25_000;
 let fileLock = Promise.resolve();
 
-async function readStore(): Promise<StoreData> {
+export function invalidateCache() {
+  memoryCache = null;
+  lastCacheTime = 0;
+  inFlightRead = null;
+}
+
+async function fetchStoreInternal(): Promise<StoreData> {
   if (usesCloudStorage()) {
     try {
       const data = await readCloudState<StoreData>({ version: 1, settings: INITIAL_SETTINGS, categories: INITIAL_CATEGORIES, products: INITIAL_PRODUCTS, shippingAreas: INITIAL_SHIPPING_AREAS, orders: [] });
       if (data && data.products) {
         data.settings = { ...INITIAL_SETTINGS, ...(data.settings || {}) };
         memoryCache = data;
+        lastCacheTime = Date.now();
         return data;
       }
     } catch (err) {
@@ -74,15 +84,12 @@ async function readStore(): Promise<StoreData> {
     }
   }
 
-  if (memoryCache) {
-    return memoryCache;
-  }
-
   try {
     const raw = await fs.readFile(DATA_FILE, "utf8");
     const parsed: StoreData = JSON.parse(raw);
     parsed.settings = { ...INITIAL_SETTINGS, ...(parsed.settings || {}) };
     memoryCache = parsed;
+    lastCacheTime = Date.now();
     return memoryCache!;
   } catch (error) {
     const initial: StoreData = {
@@ -94,6 +101,7 @@ async function readStore(): Promise<StoreData> {
       orders: [],
     };
     memoryCache = initial;
+    lastCacheTime = Date.now();
     try {
       await fs.mkdir(DATA_DIR, { recursive: true });
       await fs.writeFile(DATA_FILE, JSON.stringify(initial, null, 2), "utf8");
@@ -104,8 +112,24 @@ async function readStore(): Promise<StoreData> {
   }
 }
 
+async function readStore(forceFresh = false): Promise<StoreData> {
+  const now = Date.now();
+  if (!forceFresh && memoryCache && (now - lastCacheTime < CACHE_TTL_MS)) {
+    return memoryCache;
+  }
+
+  if (!inFlightRead) {
+    inFlightRead = fetchStoreInternal().finally(() => {
+      inFlightRead = null;
+    });
+  }
+
+  return inFlightRead;
+}
+
 async function writeStore(data: StoreData): Promise<void> {
   memoryCache = data;
+  lastCacheTime = Date.now();
   if (usesCloudStorage()) {
     try {
       await writeCloudState(data);

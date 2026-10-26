@@ -201,6 +201,7 @@ export function ProductsTableClient({
                         src={cover}
                         alt={product.name_ar}
                         fill
+                        sizes="64px"
                         className="object-cover"
                       />
                     </div>
@@ -326,6 +327,7 @@ export function ProductsTableClient({
                             src={cover}
                             alt={product.name_ar}
                             fill
+                            sizes="48px"
                             className="object-cover"
                           />
                         </div>
