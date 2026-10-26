@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { dataDirectory } from "@/lib/data-path";
 import { usesCloudStorage } from "@/lib/cloud";
-import { readCloudState, writeCloudState, cloudTransaction } from "./cloud-state";
+import { readCloudState, writeCloudState, cloudTransaction, isInCloudTransaction } from "./cloud-state";
 import {
   Category,
   CustomerSummary,
@@ -59,8 +59,10 @@ const DATA_FILE = path.join(DATA_DIR, "store.json");
 
 let memoryCache: StoreData | null = null;
 let lastCacheTime = 0;
+let cloudDownUntil = 0;
 let inFlightRead: Promise<StoreData> | null = null;
 const CACHE_TTL_MS = 25_000;
+const CLOUD_CIRCUIT_BREAKER_MS = 60_000;
 let fileLock = Promise.resolve();
 
 export function invalidateCache() {
@@ -70,16 +72,20 @@ export function invalidateCache() {
 }
 
 async function fetchStoreInternal(): Promise<StoreData> {
-  if (usesCloudStorage()) {
+  if (usesCloudStorage() && Date.now() >= cloudDownUntil) {
     try {
       const data = await readCloudState<StoreData>({ version: 1, settings: INITIAL_SETTINGS, categories: INITIAL_CATEGORIES, products: INITIAL_PRODUCTS, shippingAreas: INITIAL_SHIPPING_AREAS, orders: [] });
       if (data && data.products) {
         data.settings = { ...INITIAL_SETTINGS, ...(data.settings || {}) };
         memoryCache = data;
         lastCacheTime = Date.now();
+        cloudDownUntil = 0;
         return data;
       }
     } catch (err) {
+      if (!process.env.VITEST) {
+        cloudDownUntil = Date.now() + CLOUD_CIRCUIT_BREAKER_MS;
+      }
       console.warn("Cloud store read failed, falling back to local/memory:", err);
     }
   }
@@ -113,6 +119,10 @@ async function fetchStoreInternal(): Promise<StoreData> {
 }
 
 async function readStore(forceFresh = false): Promise<StoreData> {
+  if (isInCloudTransaction()) {
+    return fetchStoreInternal();
+  }
+
   const now = Date.now();
   if (!forceFresh && memoryCache && (now - lastCacheTime < CACHE_TTL_MS)) {
     return memoryCache;
@@ -130,7 +140,7 @@ async function readStore(forceFresh = false): Promise<StoreData> {
 async function writeStore(data: StoreData): Promise<void> {
   memoryCache = data;
   lastCacheTime = Date.now();
-  if (usesCloudStorage()) {
+  if (usesCloudStorage() && Date.now() >= cloudDownUntil) {
     try {
       await writeCloudState(data);
       return;
@@ -149,7 +159,7 @@ async function writeStore(data: StoreData): Promise<void> {
 }
 
 export async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  if (usesCloudStorage()) {
+  if (usesCloudStorage() && Date.now() >= cloudDownUntil) {
     try {
       return await cloudTransaction(fn);
     } catch (err) {

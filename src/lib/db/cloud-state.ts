@@ -54,6 +54,10 @@ export async function writeCloudState<T>(payload: T): Promise<void> {
   if (!data) throw new Conflict();
 }
 
+export function isInCloudTransaction(): boolean {
+  return Boolean(transaction.getStore());
+}
+
 // PostgreSQL checks the revision atomically across all Vercel instances. A conflict
 // reruns validation against fresh stock and orders before attempting another save.
 export async function cloudTransaction<T>(operation: () => Promise<T>): Promise<T> {
