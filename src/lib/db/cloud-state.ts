@@ -4,14 +4,35 @@ import { cloudClient } from "@/lib/cloud";
 const transaction = new AsyncLocalStorage<{ revision?: number }>();
 class Conflict extends Error {}
 
+function withTimeout<T>(promise: PromiseLike<T>, ms = 1800): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Cloud store timeout")), ms);
+    }),
+  ]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 export async function readCloudState<T>(initial?: T): Promise<T> {
   const client = cloudClient();
   if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
-  let { data, error } = await client.from("artique_state").select("revision,payload").eq("id", "store").single();
+  let { data, error } = await withTimeout(
+    client.from("artique_state").select("revision,payload").eq("id", "store").single(),
+    1800
+  );
   if (error?.code === "PGRST116" && initial) {
-    const seeded = await client.from("artique_state").upsert({ id: "store", revision: 1, payload: initial }, { onConflict: "id", ignoreDuplicates: true });
+    const seeded = await withTimeout(
+      client.from("artique_state").upsert({ id: "store", revision: 1, payload: initial }, { onConflict: "id", ignoreDuplicates: true }),
+      1800
+    );
     if (seeded.error) throw new Error(`Cloud initialization failed: ${seeded.error.message}`);
-    ({ data, error } = await client.from("artique_state").select("revision,payload").eq("id", "store").single());
+    ({ data, error } = await withTimeout(
+      client.from("artique_state").select("revision,payload").eq("id", "store").single(),
+      1800
+    ));
   }
   if (error) throw new Error(`Cloud store unavailable: ${error.message}`);
   if (!data) throw new Error("Cloud store is empty.");
@@ -25,7 +46,10 @@ export async function writeCloudState<T>(payload: T): Promise<void> {
   if (revision === undefined) throw new Error("Cloud writes require a transaction.");
   const client = cloudClient();
   if (!client) throw new Error("Cloud store unavailable: Supabase client not configured");
-  const { data, error } = await client.rpc("artique_compare_and_swap", { expected_revision: revision, next_payload: payload });
+  const { data, error } = await withTimeout(
+    client.rpc("artique_compare_and_swap", { expected_revision: revision, next_payload: payload }),
+    2500
+  );
   if (error) throw new Error(`Cloud save failed: ${error.message}`);
   if (!data) throw new Conflict();
 }
